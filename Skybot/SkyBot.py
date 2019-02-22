@@ -1,11 +1,13 @@
 import math
 import time
-import LinearAlgebra as la
-import Simulation as sim
+import keyboard
+
+import RLUtilities.LinearAlgebra as la
+import RLUtilities.Simulation as sim
 
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.structures.game_data_struct import GameTickPacket
-from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
+from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator, GameInfoState
 
 
 class SkyBot(BaseAgent):
@@ -128,6 +130,8 @@ class SkyBot(BaseAgent):
                 packet.game_boosts[pad].timer)]
 
     def return_ball_prediction(self, draw=False):
+        # returns ball prediction as [[[game_seconds],...],
+        # [vec3(prediction_loc.x, prediction_loc.y, prediction_loc.z)],...]]
         self.ball_prediction_font = self.get_ball_prediction_struct()
         self.ball_prediction = [[], []]
         self.ball_prediction[0] = [None] * self.ball_prediction_font.num_slices
@@ -147,6 +151,9 @@ class SkyBot(BaseAgent):
                 self.renderer.end_rendering()
 
     def get_ground_bounces(self):
+        # returns bounce prediction as [[[game_seconds],...],
+        # [vec3(location.x, location.y, location.z)],...]]
+        # Based on the fact that angular velocity changes on each bounce
         self.ground_bounce = [[], []]
         for p_slice in range(1, self.ball_prediction_font.num_slices):
             prev_ang_v = self.ball_prediction_font.slices[p_slice - 1].physics.angular_velocity
@@ -163,6 +170,9 @@ class SkyBot(BaseAgent):
         return
 
     def get_state(self):
+        # sets and gets the current state of the bot
+        # Planned to have:
+        # kickoff, go for dribble, dribbling, avoiding opponent, flicking
         if self.in_kickoff:
             self.state = 'kickoff'
         elif self.state == 'kickoff':
@@ -170,11 +180,18 @@ class SkyBot(BaseAgent):
         return
 
     def g_vec2(self, vec3):
+        # flattens the vector3 into a vector2
         vec2 = la.vec2(vec3[0], vec3[1])
         return vec2
 
     def g_vec3(self, vec2):
+        # unflattens the vector2 into a vector3 on the ground
         vec3 = la.vec3(vec2[0], vec2[1], 0)
+        return vec3
+
+    def c_vec3(self, vec2):
+        # unflattens the vector2 into a vector3 on the ground
+        vec3 = la.vec3(vec2[0], vec2[1], 1000)
         return vec3
 
     def choose_bounce_new_way(self):
@@ -184,20 +201,20 @@ class SkyBot(BaseAgent):
         num_bounce = len(self.ground_bounce[1])
         # num_bounce = 3
         path = [None] * num_bounce
-        end_radius = 1 / sim.max_curvature(1000)
+        end_radius = self.max_current_radius
         self.renderer.begin_rendering('bounce time')
         for bounce_n in range(num_bounce):
             bounce = self.ground_bounce[1][bounce_n]
-            if bounce_n < 3:
+            if bounce_n < 5:
                 self.renderer.draw_string_3d(bounce, 1, 1, str(self.ground_bounce[0][bounce_n] - self.time),
                                              self.renderer.black())
             bounce = self.grounded(bounce)
             radius_1_sgn = la.sgn(self.ball_loc_loc[1])
             radius_2_sgn = -la.sgn(self.ball_loc_loc[1] * self.enemy_goal_loc_loc[0])
-            path[bounce_n] = sim.ArcLineArc(self.g_vec2(self.loc),
-                                            self.g_vec2(la.normalize(self.vel)),
-                                            self.max_current_radius * radius_1_sgn * radius_multiplier,
-                                            self.g_vec2(bounce) + la.normalize(ball_goal_vector) * -300,
+            path[bounce_n] = sim.ArcLineArc(self.g_vec2(self.loc),  # first point
+                                            self.g_vec2(la.normalize(self.vel)),  # first tangent
+                                            self.max_current_radius * radius_1_sgn * radius_multiplier, #first radius
+                                            self.g_vec2(bounce) + la.normalize(ball_goal_vector) * -500,
                                             la.normalize(ball_goal_vector),
                                             end_radius * radius_2_sgn * radius_multiplier)
             # path.is_valid
@@ -212,10 +229,15 @@ class SkyBot(BaseAgent):
         self.renderer.end_rendering()
         self.renderer.begin_rendering('path')
         for line in range(len(path)):
-            speed_needed = abs((path[line].length + 700) / ((self.ground_bounce[0][line]) - self.time))
+            if not path[line].is_valid:
+                continue
+            speed_needed = abs((path[line].length + 1000) / ((self.ground_bounce[0][line]) - self.time))
             if 0 > speed_needed or speed_needed > self.max_speed[1]:
                 continue
             else:
+                print(line)
+                print(path[line].is_valid)
+                bounce = self.ground_bounce[1][line]
                 self.renderer.draw_line_3d(self.g_vec3(path[line].q1), self.g_vec3(path[line].q2), self.renderer.pink())
                 points = 25
                 curve1 = [None] * (points + 1)
@@ -231,9 +253,19 @@ class SkyBot(BaseAgent):
                 self.renderer.draw_polyline_3d(curve2, self.renderer.pink())
                 self.renderer.draw_line_3d(self.g_vec3(path[line].p2), self.g_vec3(self.enemy_goal_loc),
                                            self.renderer.pink())
+                self.renderer.draw_line_3d(
+                    (self.g_vec3(self.g_vec2(bounce) + la.normalize(ball_goal_vector) * -500)),
+                    ((self.c_vec3(self.g_vec2(bounce) + la.normalize(ball_goal_vector) * -500))),
+                    self.renderer.black())
+                self.renderer.draw_line_3d(
+                    (self.g_vec3(self.g_vec2(bounce))),
+                    (self.c_vec3(self.g_vec2(bounce))),
+                    self.renderer.red())
                 self.renderer.end_rendering()
+                print(self.g_vec3(path[line].q2))
                 return [self.g_vec3(path[line].q2), speed_needed]
         self.renderer.end_rendering()
+        print('old way') # Todo: if none found use current or last position
         return self.choose_bounce_old_way()
 
     def choose_bounce_old_way(self):
@@ -257,6 +289,10 @@ class SkyBot(BaseAgent):
 
     def what_to_do(self):
         # todo: add  ball saving state
+        print(self.state)
+        self.bounce = self.choose_bounce_new_way()
+        self.aim(self.to_local(self.bounce[0] - self.loc), speed_needed=self.bounce[1])
+        return
         if self.state == None:
             self.state = 'go for dribble'
         if self.state == 'kickoff':
@@ -325,6 +361,7 @@ class SkyBot(BaseAgent):
         return
 
     def aim(self, local_target, speed_needed=99999):
+        print(local_target)
         self.renderer.begin_rendering('aim')
         self.renderer.draw_line_3d((self.to_world(local_target) + self.loc), self.loc, self.renderer.green())
         self.renderer.end_rendering()
@@ -353,10 +390,10 @@ class SkyBot(BaseAgent):
                 if la.norm(local_target) < 200:
                     self.controller.throttle = la.norm(local_target) / 200
         if speed_needed < la.norm(self.vel):
-            self.controller.throttle = -1
+            self.controller.throttle = 0
             self.controller.boost = 0
-            if la.norm(local_target) < 200:
-                self.controller.throttle = -la.norm(local_target) / 200
+            if la.norm(local_target) < 250:
+                self.controller.throttle = -la.norm(local_target) / 250
             if la.norm(local_target) < 100:
                 self.controller.throttle = -la.norm(local_target) / 100
         if self.sonic:
@@ -392,18 +429,16 @@ class SkyBot(BaseAgent):
         enemy_state = CarState(physics=Physics(location=Vector3(x=0, y=self.enemy_goal_loc[1], z=100),
                                                rotation=Rotator(0, 0, 0)))
 
-        car_state = CarState(boost_amount=100, physics=Physics(location=Vector3(x=0, y=-500, z=0),
+        car_state = CarState(boost_amount=100, physics=Physics(location=Vector3(x=-1500, y=-4000, z=20),
                                                                rotation=Rotator(0, math.pi / 2, 0),
-                                                               velocity=Vector3(x=0, y=300, z=0)))
-        ball_state = BallState(Physics(location=Vector3(-2000, -5000, 1000), velocity=Vector3(x=0, y=500, z=200)))
-        game_state = GameState(ball=ball_state, cars={self.index: car_state, 1: enemy_state})
-        game_state2 = GameState(cars={1: enemy_state})
+                                                               velocity=Vector3(x=0, y=1000, z=0)))
+        ball_state = BallState(Physics(location=Vector3(-2000, -3000, 700), velocity=Vector3(x=00, y=500, z=200)))
+        game_info_state = GameInfoState(game_speed=0.3)
+        game_state = GameState(ball=ball_state, cars={self.index: car_state}, game_info=game_info_state)
         # game_state = GameState(cars={self.index: car_state})
-        if not self.in_kickoff:
-            if number == 0:
-                self.set_game_state(game_state)
-            else:
-                self.set_game_state(game_state2)
+        #if keyboardd.is_pressed('t'):
+        self.set_game_state(game_state)
+
 
 
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
@@ -411,15 +446,13 @@ class SkyBot(BaseAgent):
         if not self.ended and self.r_active:
             self.get_local()
             self.get_state()
-            self.return_ball_prediction(draw=False)
+            self.return_ball_prediction(draw=True)
             self.get_ground_bounces()
 
             self.what_to_do()
-            print(self.state)
-            print(self.in_kickoff)
 
-            # self.render()
+            self.render()
 
-            # self.set_state()
+            #self.set_state()
 
             return self.controller
